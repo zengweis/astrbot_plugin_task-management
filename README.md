@@ -26,6 +26,9 @@
 ![image](https://github.com/user-attachments/assets/90e04495-3b40-4cfa-8ca6-a9cdcdf1832c)
 
 
+#### Ciallo～(∠・ω< )⌒★
+欢迎从雨厨关注一下https://github.com/zengweis/goshujin
+
 
 
 
