@@ -1,30 +1,33 @@
 import json
 import os
+import re
 from datetime import datetime
 from typing import Dict, List
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 
 # === 全局配置 ===
-TASKS_FILE = "tasks.json"
-POINTS_FILE = "points.json"
+PLUGIN_DIR = os.path.join(os.path.dirname(__file__), "data")
+TASKS_FILE = os.path.join(PLUGIN_DIR, "tasks.json")
+POINTS_FILE = os.path.join(PLUGIN_DIR, "points.json")
 ADMIN_IDS = "2195556927"  # 管理员用户ID（用逗号分隔）
-TASK_PERMISSION_MODE = 0      # 发布任务选项 0=所有人可发布 1=仅管理员发布
+TASK_PERMISSION_MODE = 0  # 发布任务选项 0=所有人可发布 1=仅管理员发布
 
 # === 初始化处理 ===
 admin_list = [uid.strip() for uid in ADMIN_IDS.split(",") if uid.strip()]
+os.makedirs(PLUGIN_DIR, exist_ok=True)
 
 def load_data(file_path: str) -> List[Dict]:
     """加载JSON数据文件"""
     if not os.path.exists(file_path):
         return []
-    with open(file_path, "r") as f:
+    with open(file_path, "r", encoding="utf-8") as f:
         return json.load(f)
 
 def save_data(data: List[Dict], file_path: str):
     """保存数据到JSON文件"""
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=2)
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
 
 def migrate_old_data():
     """数据迁移：兼容旧版数据结构"""
@@ -32,14 +35,12 @@ def migrate_old_data():
     updated = False
     
     for task in tasks:
-        # 迁移旧版 accepted_by 字段
         if "accepted_by" in task and "accepted_by_id" not in task:
             task["accepted_by_id"] = task["accepted_by"]
             task["accepted_by_name"] = "历史用户"
             del task["accepted_by"]
             updated = True
         
-        # 补充缺失的发布者名称字段
         if "publisher_name" not in task:
             task["publisher_name"] = "历史发布者"
             updated = True
@@ -47,19 +48,46 @@ def migrate_old_data():
     if updated:
         save_data(tasks, TASKS_FILE)
 
-@register("task_system", "Developer", "任务管理系统", "3.2.1")
+# === 任务系统核心 ===
+@register("task_system", "Developer", "任务管理系统", "3.3.1")
 class AdvancedTaskSystem(Star):
     def __init__(self, context: Context):
-        migrate_old_data()  # 初始化时执行数据迁移
         super().__init__(context)
+        migrate_old_data()
         self.admin_ids = admin_list
 
     def _get_user_info(self, event: AstrMessageEvent) -> Dict:
-        """安全获取用户信息"""
+        """获取用户信息"""
         return {
             "id": event.get_sender_id(),
             "name": event.get_sender_name() or "未知用户"
         }
+
+    def _generate_task_id(self) -> str:
+        """生成MMDD+序号格式的任务ID（示例：0715001）"""
+        date_str = datetime.now().strftime("%m%d")
+        tasks = load_data(TASKS_FILE)
+        
+        same_day_tasks = [
+            t for t in tasks 
+            if t["task_id"].startswith(date_str) 
+            and len(t["task_id"]) == 7
+            and t["task_id"][4:].isdigit()
+        ]
+        max_serial = max(
+            (int(t["task_id"][4:]) for t in same_day_tasks),
+            default=0
+        )
+        return f"{date_str}{max_serial + 1:03d}"
+
+    def _validate_task_id(self, task_id: str) -> bool:
+        """校验任务ID格式"""
+        return (
+            len(task_id) == 7 and
+            task_id.isdigit() and
+            1 <= int(task_id[:2]) <= 12 and
+            1 <= int(task_id[2:4]) <= 31
+        )
 
     # === 任务发布模块 ===
     @filter.command("发布任务")
@@ -71,7 +99,7 @@ class AdvancedTaskSystem(Star):
             return
 
         tasks = load_data(TASKS_FILE)
-        task_id = datetime.now().strftime("%y%m%d%H%M%S")
+        task_id = self._generate_task_id()
         
         new_task = {
             "task_id": task_id,
@@ -96,6 +124,10 @@ class AdvancedTaskSystem(Star):
     @filter.command("接受任务")
     async def accept_task(self, event: AstrMessageEvent, task_id: str):
         """接受可用任务"""
+        if not self._validate_task_id(task_id):
+            yield event.plain_result("❌ 任务ID格式应为7位数字（例：0715001）")
+            return
+        
         user = self._get_user_info(event)
         tasks = load_data(TASKS_FILE)
         
@@ -115,6 +147,10 @@ class AdvancedTaskSystem(Star):
     @filter.command("完成任务")
     async def user_complete(self, event: AstrMessageEvent, task_id: str):
         """用户提交任务完成"""
+        if not self._validate_task_id(task_id):
+            yield event.plain_result("❌ 无效的任务ID格式")
+            return
+        
         user = self._get_user_info(event)
         tasks = load_data(TASKS_FILE)
         
@@ -127,7 +163,6 @@ class AdvancedTaskSystem(Star):
                 task["status"] = "pending_review"
                 save_data(tasks, TASKS_FILE)
                 
-                # 通知所有管理员
                 admin_mentions = " ".join([f"@{uid}" for uid in self.admin_ids])
                 yield event.plain_result(
                     f"📢 任务完成待审核\n"
@@ -142,6 +177,10 @@ class AdvancedTaskSystem(Star):
     @filter.command("审核任务")
     async def review_task(self, event: AstrMessageEvent, task_id: str):
         """管理员审核任务"""
+        if not self._validate_task_id(task_id):
+            yield event.plain_result("❌ 无效的任务ID格式")
+            return
+        
         user = self._get_user_info(event)
         if user["id"] not in self.admin_ids:
             yield event.plain_result("⛔ 需要管理员权限")
@@ -161,24 +200,26 @@ class AdvancedTaskSystem(Star):
             yield event.plain_result("❌ 无效的任务ID")
             return
             
-        # 更新任务状态
         target_task["status"] = "completed"
+        completer_id = target_task["accepted_by_id"]
         
         # 更新积分
-        completer_id = target_task["accepted_by_id"]
         user_points = next(
             (p for p in points if p["user_id"] == completer_id),
-            {"user_id": completer_id, "name": target_task["accepted_by_name"], "points": 0}
+            None
         )
-        user_points["points"] += 10
-        
-        if user_points not in points:
+        if not user_points:
+            user_points = {
+                "user_id": completer_id,
+                "name": target_task["accepted_by_name"],
+                "points": 0
+            }
             points.append(user_points)
+        user_points["points"] += 10
         
         save_data(tasks, TASKS_FILE)
         save_data(points, POINTS_FILE)
         
-        # 发送双通知
         yield event.plain_result(
             f"🎉 任务审核通过通知\n"
             f"任务ID：{task_id}\n"
@@ -195,7 +236,6 @@ class AdvancedTaskSystem(Star):
         
         my_tasks = []
         for t in tasks:
-            # 自己发布的任务
             if t["publisher_id"] == user["id"] and t["status"] != "completed":
                 my_tasks.append({
                     "type": "我发布的",
@@ -203,7 +243,6 @@ class AdvancedTaskSystem(Star):
                     "status": t["status"],
                     "content": t["content"]
                 })
-            # 自己接受的任务
             if t.get("accepted_by_id") == user["id"] and t["status"] != "completed":
                 my_tasks.append({
                     "type": "我接受的",
@@ -217,13 +256,12 @@ class AdvancedTaskSystem(Star):
             return
             
         response = ["📋 我的任务列表"]
+        status_map = {
+            "pending": "待接受",
+            "accepted": "进行中", 
+            "pending_review": "待审核"
+        }
         for task in my_tasks:
-            status_map = {
-                "pending": "待接受",
-                "accepted": "进行中", 
-                "pending_review": "待审核",
-                "completed": "已完成"
-            }
             response.append(
                 f"{task['type']} - {status_map[task['status']]}\n"
                 f"ID：{task['id']}\n"
@@ -251,22 +289,18 @@ class AdvancedTaskSystem(Star):
         }
         
         for task in tasks:
-            # 数据兼容处理
-            publisher = task.get("publisher_name", "未知发布者")
-            accepted = task.get("accepted_by_name", "暂无")
             content_preview = (task["content"][:20] + "...") if len(task["content"]) > 20 else task["content"]
             
             item = (
                 f"ID：{task['task_id']}\n"
                 f"内容：{content_preview}\n"
-                f"发布者：{publisher}\n"
+                f"发布者：{task['publisher_name']}\n"
                 f"状态：{self._get_status_label(task['status'])}"
             )
             
-            if accepted != "暂无":
-                item += f"\n执行者：{accepted}"
+            if task["accepted_by_name"]:
+                item += f"\n执行者：{task['accepted_by_name']}"
                 
-            # 分类处理
             status = task.get("status", "pending")
             if status == "pending":
                 task_groups["🟢 可接受任务（未认领）"].append(item)
@@ -287,13 +321,12 @@ class AdvancedTaskSystem(Star):
 
     def _get_status_label(self, status: str) -> str:
         """获取状态标签"""
-        status_labels = {
+        return {
             "pending": "待接受",
             "accepted": "进行中",
             "pending_review": "待审核",
             "completed": "已完成"
-        }
-        return status_labels.get(status, "未知状态")
+        }.get(status, "未知状态")
 
     # === 积分系统 ===
     @filter.command("我的积分")
@@ -327,3 +360,23 @@ class AdvancedTaskSystem(Star):
         yield event.plain_result(
             "🏆 积分排行榜TOP10：\n" + "\n".join(rank_list)
         )
+
+    # === 帮助系统 ===
+    @filter.command("任务帮助")
+    async def show_help(self, event: AstrMessageEvent):
+        """显示任务系统帮助"""
+        help_text = [
+            "📘 任务系统使用指南",
+            "————————————",
+            "1. 发布任务：/发布任务 任务内容",
+            "   - 示例：/发布任务 编写用户手册",
+            "2. 接受任务：/接受任务 任务ID",
+            "   - 示例：/接受任务 0715001",
+            "3. 完成任务：/完成任务 任务ID",
+            "4. 审核任务：/审核任务 任务ID（管理员）",
+            "5. 查看任务：/任务列表 或 /我的任务",
+            "6. 积分查询：/我的积分 或 /积分榜",
+            "————————————",
+            f"任务ID格式说明：月份(2)+日期(2)+序号(3)\n当前示例：{self._generate_task_id()}"
+        ]
+        yield event.plain_result("\n".join(help_text))
