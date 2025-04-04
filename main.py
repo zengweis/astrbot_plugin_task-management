@@ -49,7 +49,7 @@ def migrate_old_data():
         save_data(tasks, TASKS_FILE)
 
 # === 任务系统核心 ===
-@register("task_system", "Developer", "任务管理系统", "3.3.1")
+@register("task_system", "Developer", "任务管理系统", "1.0")
 class AdvancedTaskSystem(Star):
     def __init__(self, context: Context):
         super().__init__(context)
@@ -215,7 +215,7 @@ class AdvancedTaskSystem(Star):
                 "points": 0
             }
             points.append(user_points)
-        user_points["points"] += 10
+        user_points["points"] += 1
         
         save_data(tasks, TASKS_FILE)
         save_data(points, POINTS_FILE)
@@ -224,7 +224,7 @@ class AdvancedTaskSystem(Star):
             f"🎉 任务审核通过通知\n"
             f"任务ID：{task_id}\n"
             f"@{target_task['publisher_name']} 您发布的任务已完成\n"
-            f"@{target_task['accepted_by_name']} 获得10积分（当前：{user_points['points']}）"
+            f"@{target_task['accepted_by_name']} 获得1积分（当前：{user_points['points']}）"
         )
 
     # === 任务查询模块 ===
